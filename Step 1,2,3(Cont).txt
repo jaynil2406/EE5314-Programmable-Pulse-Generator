@@ -1,0 +1,183 @@
+// Timing C/ASM Mix Example
+// Jason Losh
+
+//-----------------------------------------------------------------------------
+// Hardware Target
+//-----------------------------------------------------------------------------
+
+// Target Platform: EK-TM4C123GXL Evaluation Board
+// Target uC:       TM4C123GH6PM
+// System Clock:    40 MHz
+
+// Hardware configuration:
+// Red LED:
+//   PF1 drives an NPN transistor that powers the red LED
+
+//-----------------------------------------------------------------------------
+// Device includes, defines, and assembler directives
+//-----------------------------------------------------------------------------
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "tm4c123gh6pm.h"
+
+
+#define RED_LED      (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 1*4)))
+#define GREEN_LED      (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 3*4)))
+#define BLUE_LED      (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4)))
+//#define NEW_LED      (*((volatile uint32_t *)(0x42000000 + (0x400073FC-0x40000000)*32 + 2*4)))
+
+#define RED_LED_MASK 2
+#define GREEN_LED_MASK 8
+#define BLUE_LED_MASK 4
+#define NEW_LED_MASK 4
+
+//-----------------------------------------------------------------------------
+// Subroutines
+//-----------------------------------------------------------------------------
+
+// Initialize Hardware
+void initHw()
+{
+    // Configure HW to work with 16 MHz XTAL, PLL enabled, sysdivider of 5, creating system clock of 20 MHz
+
+   // SYSCTL_RCC_R = SYSCTL_RCC_XTAL_16MHZ | SYSCTL_RCC_OSCSRC_MAIN | SYSCTL_RCC_USESYSDIV | (9 << SYSCTL_RCC_SYSDIV_S);
+
+   // SYSCTL_RCC_R = SYSCTL_RCC_XTAL_16MHZ | SYSCTL_RCC_OSCSRC_MAIN | SYSCTL_RCC_USESYSDIV | (0xA << SYSCTL_RCC_SYSDIV_S);
+
+    // Configure HW to work with 16 MHz XTAL, PLL enabled, sysdivider of 5, creating system clock of 40 MHz
+   SYSCTL_RCC_R = SYSCTL_RCC_XTAL_16MHZ | SYSCTL_RCC_OSCSRC_MAIN | SYSCTL_RCC_USESYSDIV | (4 << SYSCTL_RCC_SYSDIV_S);
+
+    // Set GPIO ports to use APB (not needed since default configuration -- for clarity)
+    SYSCTL_GPIOHBCTL_R = 0;
+    SYSCTL_RCGC0_R |= SYSCTL_RCGC0_PWM0;
+    // Enable GPIO port F peripherals
+    SYSCTL_RCGC2_R = SYSCTL_RCGC2_GPIOF;
+   // SYSCTL_RCGC2_R = SYSCTL_RCGC2_GPIOD;
+    // Configure LED pin
+    GPIO_PORTF_DIR_R |=  RED_LED_MASK | GREEN_LED_MASK | BLUE_LED_MASK;                       // make bit5 an output
+    GPIO_PORTF_DR2R_R |=  RED_LED_MASK| GREEN_LED_MASK | BLUE_LED_MASK;                      // set drive strength to 2mA
+    GPIO_PORTF_DEN_R |=  RED_LED_MASK| GREEN_LED_MASK | BLUE_LED_MASK;                       // enable digital
+    GPIO_PORTF_AFSEL_R |=  RED_LED_MASK| GREEN_LED_MASK | BLUE_LED_MASK;                     // select auxilary function
+    GPIO_PORTF_PCTL_R &= GPIO_PCTL_PF1_M |GPIO_PCTL_PF2_M | GPIO_PCTL_PF3_M;                      // enable PWM
+    GPIO_PORTF_PCTL_R |= GPIO_PCTL_PF1_M1PWM5 |GPIO_PCTL_PF2_M1PWM6 |GPIO_PCTL_PF3_M1PWM7 ;
+
+
+    SYSCTL_SRPWM_R = SYSCTL_SRPWM_R1;
+    SYSCTL_SRPWM_R = 0;
+    PWM1_3_CTL_R = 0;                       // turn-off PWM1 generator 3
+   PWM1_2_CTL_R = 0;                        // turn-off PWM1 generator 2
+   PWM1_2_GENB_R = PWM_1_GENB_ACTCMPBD_ZERO | PWM_1_GENB_ACTLOAD_ONE;
+                                                     // output 1 on PWM1, gen 2b, cmpb
+   PWM1_3_GENA_R = PWM_1_GENA_ACTCMPAD_ZERO | PWM_1_GENA_ACTLOAD_ONE;
+                                                       // output 2 on PWM1, gen 3a, cmpa
+   PWM1_3_GENB_R = PWM_1_GENB_ACTCMPBD_ZERO | PWM_1_GENB_ACTLOAD_ONE;
+                                                      // output 3 on PWM1, gen 3b, cmpb
+    PWM1_2_LOAD_R = 1024;
+    PWM1_3_LOAD_R = 1024;
+    PWM1_INVERT_R =  PWM_INVERT_PWM5INV |PWM_INVERT_PWM6INV | PWM_INVERT_PWM7INV;
+                                                         // invert outputs so duty cycle increases with increasing compare values
+        PWM1_2_CMPB_R = 0;                               // red off (0=always low, 1023=always high)
+        PWM1_3_CMPB_R = 0;                               // green off
+        PWM1_3_CMPA_R = 0;                               // blue off
+        PWM1_2_CTL_R = PWM_2_CTL_ENABLE;
+        PWM1_3_CTL_R = PWM_3_CTL_ENABLE;
+        PWM1_ENABLE_R = PWM_ENABLE_PWM5EN |PWM_ENABLE_PWM6EN | PWM_ENABLE_PWM7EN;
+}
+
+// Approximate busy waiting (in units of microseconds), given a 40 MHz system clock
+void waitMicrosecond(uint32_t us)
+{
+    __asm("WMS_LOOP0:   MOV  R1, #6");          // 1
+    __asm("WMS_LOOP1:   SUB  R1, #1");          // 6
+    __asm("             CBZ  R1, WMS_DONE1");   // 5+1*3
+    __asm("             NOP");                  // 5
+    __asm("             NOP");                  // 5
+    __asm("             B    WMS_LOOP1");       // 5*2 (speculative, so P=1)
+    __asm("WMS_DONE1:   SUB  R0, #1");          // 1
+    __asm("             CBZ  R0, WMS_DONE0");   // 1
+    __asm("             NOP");                  // 1
+    __asm("             B    WMS_LOOP0");       // 1*2 (speculative, so P=1)
+    __asm("WMS_DONE0:");                        // ---
+                                                // 40 clocks/us + error
+}
+void setRgbColor(uint16_t red, uint16_t green, uint16_t blue)
+{
+    PWM1_1_CMPB_R = red;
+    PWM1_2_CMPA_R = blue;
+    PWM1_2_CMPB_R = green;
+}
+
+void RED_OFF()
+{
+   RED_LED  =0;
+}
+void RED_ON()
+{
+   RED_LED  =1;
+}
+void GREEN_OFF()
+{
+   GREEN_LED  =0;
+}
+void GREEN_ON()
+{
+   GREEN_LED  =1;
+}
+void BLUE_OFF()
+{
+    BLUE_LED =0;
+}
+void BLUE_ON()
+{
+   BLUE_LED  =1;
+}
+//-----------------------------------------------------------------------------
+// Main
+//-----------------------------------------------------------------------------
+
+int main(void)
+{
+    // Initialize hardware
+    initHw();
+
+    // Toggle red LED every second
+    while(1)
+    {
+        int16_t i = 0;
+            while(1)
+            {
+                // Backlight off
+                setRgbColor(0, 0, 0);
+                waitMicrosecond(1000000);
+                // Ramp from off to bright white
+                for (i = 0; i < 1024; i++)
+                {
+                    setRgbColor(i, i, i);
+                    waitMicrosecond(10000);
+                }
+                // Red
+                setRgbColor(1023, 0, 0);
+                waitMicrosecond(1000000);
+                // Orange
+                setRgbColor(1023, 384, 0);
+                waitMicrosecond(1000000);
+                // Yellow
+                setRgbColor(1023, 1023, 8);
+                waitMicrosecond(1000000);
+                // Green
+                setRgbColor(0, 1023, 0);
+                waitMicrosecond(1000000);
+                // Cyan
+                setRgbColor(0, 1023, 1023);
+                waitMicrosecond(1000000);
+                // Blue
+                setRgbColor(0, 0, 1023);
+                waitMicrosecond(1000000);
+                // Magenta
+                setRgbColor(1023, 0, 1023);
+                waitMicrosecond(1000000);
+            }
+
+    }
+}
